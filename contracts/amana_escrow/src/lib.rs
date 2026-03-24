@@ -31,6 +31,14 @@ pub struct TradeFundedEvent {
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TradeCancelledEvent {
+    pub trade_id: u64,
+    pub refund_amount: i128,
+    pub caller: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeliveryConfirmedEvent {
     pub trade_id: u64,
     pub delivered_at: u64,
@@ -83,6 +91,7 @@ pub enum DataKey {
     UsdcContract,
     FeeBps,
     Treasury,
+    CancelRequest(u64),
 }
 
 const NEXT_TRADE_ID: Symbol = symbol_short!("NXTTRD");
@@ -152,6 +161,73 @@ impl EscrowContract {
         env.events().publish((symbol_short!("TRDFND"), trade_id), TradeFundedEvent {
             trade_id, amount: trade.amount
         });
+    }
+
+    pub fn cancel_trade(env: Env, trade_id: u64, caller: Address) {
+        let key = DataKey::Trade(trade_id);
+        let mut trade: Trade = env.storage().persistent().get(&key).expect("Trade not found");
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("Not initialized");
+
+        caller.require_auth();
+
+        if matches!(trade.status, TradeStatus::Created) {
+            // Either party or admin can cancel immediately when not funded
+            assert!(caller == trade.buyer || caller == trade.seller || caller == admin, "Unauthorized caller");
+
+            Self::execute_cancellation(&env, &mut trade, 0, caller);
+        } else if matches!(trade.status, TradeStatus::Funded) {
+            let amount = trade.amount;
+            if caller == admin {
+                // Admin override
+                Self::execute_cancellation(&env, &mut trade, amount, admin);
+            } else {
+                // Must be buyer or seller agreement
+                assert!(caller == trade.buyer || caller == trade.seller, "Unauthorized caller");
+
+                let req_key = DataKey::CancelRequest(trade_id);
+                // request.0 = buyer, request.1 = seller
+                let mut requests: (bool, bool) = env.storage().persistent().get(&req_key).unwrap_or((false, false));
+
+                if caller == trade.buyer {
+                    requests.0 = true;
+                } else if caller == trade.seller {
+                    requests.1 = true;
+                }
+
+                if requests.0 && requests.1 {
+                    // Both have agreed
+                    Self::execute_cancellation(&env, &mut trade, amount, caller);
+                    env.storage().persistent().remove(&req_key);
+                } else {
+                    // Record request and wait for other party
+                    env.storage().persistent().set(&req_key, &requests);
+                    trade.updated_at = env.ledger().timestamp();
+                    env.storage().persistent().set(&key, &trade);
+                }
+            }
+        } else {
+            panic!("Cannot cancel trade in current status");
+        }
+    }
+
+    fn execute_cancellation(env: &Env, trade: &mut Trade, refund_amount: i128, caller: Address) {
+        if refund_amount > 0 {
+            let token_client = token::Client::new(env, &trade.token);
+            token_client.transfer(&env.current_contract_address(), &trade.buyer, &refund_amount);
+        }
+
+        trade.status = TradeStatus::Cancelled;
+        trade.updated_at = env.ledger().timestamp();
+        env.storage().persistent().set(&DataKey::Trade(trade.trade_id), trade);
+
+        env.events().publish(
+            (symbol_short!("TRDCAN"), trade.trade_id),
+            TradeCancelledEvent {
+                trade_id: trade.trade_id,
+                refund_amount,
+                caller,
+            },
+        );
     }
 
     pub fn confirm_delivery(env: Env, trade_id: u64) {
@@ -277,5 +353,116 @@ mod test {
         let trade_id = client.create_trade(&buyer, &seller, &amount);
         client.deposit(&trade_id);
         client.deposit(&trade_id);
+    }
+
+    #[test]
+    fn test_cancel_before_funding_succeeds_for_either_party() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(EscrowContract, ());
+        let client = EscrowContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let buyer = Address::generate(&env);
+        let seller = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let usdc_id = env.register_stellar_asset_contract(admin.clone());
+        client.initialize(&admin, &usdc_id, &treasury, &100);
+
+        // 1. Buyer can cancel
+        let trade_id_1 = client.create_trade(&buyer, &seller, &1000_i128);
+        client.cancel_trade(&trade_id_1, &buyer);
+        assert!(matches!(client.get_trade(&trade_id_1).status, TradeStatus::Cancelled));
+
+        // 2. Seller can cancel
+        let trade_id_2 = client.create_trade(&buyer, &seller, &1000_i128);
+        client.cancel_trade(&trade_id_2, &seller);
+        assert!(matches!(client.get_trade(&trade_id_2).status, TradeStatus::Cancelled));
+    }
+
+    #[test]
+    fn test_cancel_after_funding_requires_both_parties() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(EscrowContract, ());
+        let client = EscrowContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let buyer = Address::generate(&env);
+        let seller = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let usdc_id = env.register_stellar_asset_contract(admin.clone());
+        client.initialize(&admin, &usdc_id, &treasury, &100);
+
+        let amount = 1000_i128;
+        let token_client = token::StellarAssetClient::new(&env, &usdc_id);
+        token_client.mint(&buyer, &amount);
+        
+        let trade_id = client.create_trade(&buyer, &seller, &amount);
+        client.deposit(&trade_id);
+
+        // Buyer requests cancel
+        client.cancel_trade(&trade_id, &buyer);
+        assert!(matches!(client.get_trade(&trade_id).status, TradeStatus::Funded));
+
+        // Seller requests cancel
+        client.cancel_trade(&trade_id, &seller);
+        assert!(matches!(client.get_trade(&trade_id).status, TradeStatus::Cancelled));
+    }
+
+    #[test]
+    fn test_cancel_refunds_buyer_correctly() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(EscrowContract, ());
+        let client = EscrowContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let buyer = Address::generate(&env);
+        let seller = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let usdc_id = env.register_stellar_asset_contract(admin.clone());
+        client.initialize(&admin, &usdc_id, &treasury, &100);
+
+        let amount = 5000_i128;
+        let token_client = token::StellarAssetClient::new(&env, &usdc_id);
+        token_client.mint(&buyer, &amount);
+        
+        let trade_id = client.create_trade(&buyer, &seller, &amount);
+        client.deposit(&trade_id);
+
+        // Verify contract holds funds
+        let token_readonly = token::Client::new(&env, &usdc_id);
+        assert_eq!(token_readonly.balance(&client.address), amount);
+
+        // Cancel via both parties
+        client.cancel_trade(&trade_id, &buyer);
+        client.cancel_trade(&trade_id, &seller);
+
+        // Verify refund
+        assert_eq!(token_readonly.balance(&buyer), amount);
+        assert_eq!(token_readonly.balance(&client.address), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot cancel trade in current status")]
+    fn test_cancel_fails_after_delivery_confirmed() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(EscrowContract, ());
+        let client = EscrowContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let buyer = Address::generate(&env);
+        let seller = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let usdc_id = env.register_stellar_asset_contract(admin.clone());
+        client.initialize(&admin, &usdc_id, &treasury, &100);
+
+        let amount = 1000_i128;
+        let token_client = token::StellarAssetClient::new(&env, &usdc_id);
+        token_client.mint(&buyer, &amount);
+        
+        let trade_id = client.create_trade(&buyer, &seller, &amount);
+        client.deposit(&trade_id);
+        client.confirm_delivery(&trade_id);
+
+        client.cancel_trade(&trade_id, &buyer);
     }
 }
