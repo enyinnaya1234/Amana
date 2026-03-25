@@ -1,10 +1,16 @@
-import * as StellarSdk from "@stellar/stellar-sdk";
 import { Trade } from "@prisma/client";
+import * as StellarSdk from "@stellar/stellar-sdk";
+import type { TradeRecord } from "../types/trade";
 
 const DEFAULT_RPC_URL = "https://soroban-testnet.stellar.org";
 const DEFAULT_TIMEOUT_SECONDS = 300;
 const USDC_DECIMALS = 7n;
 const USDC_BASE = 10n ** USDC_DECIMALS;
+
+type RpcServerFactory = (rpcUrl: string) => StellarSdk.rpc.Server;
+
+let serverFactory: RpcServerFactory = (rpcUrl: string) =>
+  new StellarSdk.rpc.Server(rpcUrl, { allowHttp: true });
 
 export interface BuildCreateTradeTxInput {
   buyerAddress: string;
@@ -21,6 +27,132 @@ export interface BuildDepositTxResult {
   unsignedXdr: string;
 }
 
+/** Vitest-only hook to avoid live Soroban RPC in unit tests. */
+export function __setRpcServerFactoryForTests(factory: RpcServerFactory): void {
+  serverFactory = factory;
+}
+
+export function __resetRpcServerFactoryForTests(): void {
+  serverFactory = (rpcUrl: string) =>
+    new StellarSdk.rpc.Server(rpcUrl, { allowHttp: true });
+}
+
+function requireEnv(name: string, fallback = ""): string {
+  const value = process.env[name] ?? fallback;
+  if (!value) {
+    throw new Error(`Missing required environment variable: ${name}`);
+  }
+  return value;
+}
+
+function resolveNetworkPassphrase(
+  configuredPassphrase?: string,
+  configuredNetwork?: string,
+): string {
+  if (configuredPassphrase) {
+    return configuredPassphrase;
+  }
+
+  switch (configuredNetwork?.toUpperCase()) {
+    case "PUBLIC":
+      return StellarSdk.Networks.PUBLIC;
+    case "FUTURENET":
+      return StellarSdk.Networks.FUTURENET;
+    default:
+      return StellarSdk.Networks.TESTNET;
+  }
+}
+
+function getRpcServer(rpcUrl: string): StellarSdk.rpc.Server {
+  return serverFactory(rpcUrl);
+}
+
+function getEscrowContractId(): string {
+  return requireEnv("AMANA_ESCROW_CONTRACT_ID", process.env.CONTRACT_ID || "");
+}
+
+function getRpcUrl(): string {
+  return process.env.SOROBAN_RPC_URL || process.env.STELLAR_RPC_URL || DEFAULT_RPC_URL;
+}
+
+function getNetworkPassphrase(): string {
+  return resolveNetworkPassphrase(
+    process.env.STELLAR_NETWORK_PASSPHRASE,
+    process.env.STELLAR_NETWORK,
+  );
+}
+
+/**
+ * Builds an unsigned Soroban transaction XDR (base64) for `confirm_delivery(trade_id)`.
+ * Caller should sign and submit via a wallet / RPC.
+ */
+export async function buildConfirmDeliveryTx(
+  trade: TradeRecord,
+  sourceAccountId: string,
+): Promise<string> {
+  if (trade.status !== "FUNDED") {
+    throw new Error(
+      `Trade must be FUNDED before confirm_delivery (current: ${trade.status})`,
+    );
+  }
+
+  const server = getRpcServer(getRpcUrl());
+  const account = await server.getAccount(sourceAccountId);
+  const contract = new StellarSdk.Contract(getEscrowContractId());
+  const transaction = new StellarSdk.TransactionBuilder(account, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase: getNetworkPassphrase(),
+  })
+    .addOperation(
+      contract.call(
+        "confirm_delivery",
+        StellarSdk.xdr.ScVal.scvU64(
+          StellarSdk.xdr.Uint64.fromString(trade.chainTradeId),
+        ),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const prepared = await server.prepareTransaction(transaction);
+  return prepared.toXDR();
+}
+
+/**
+ * Builds an unsigned Soroban transaction XDR (base64) for `release_funds(trade_id)`.
+ */
+export async function buildReleaseFundsTx(
+  trade: TradeRecord,
+  sourceAccountId: string,
+): Promise<string> {
+  if (trade.status !== "DELIVERED") {
+    throw new Error(
+      `Trade must be DELIVERED before release_funds (current: ${trade.status})`,
+    );
+  }
+
+  const server = getRpcServer(getRpcUrl());
+  const account = await server.getAccount(sourceAccountId);
+  const contract = new StellarSdk.Contract(getEscrowContractId());
+  const transaction = new StellarSdk.TransactionBuilder(account, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase: getNetworkPassphrase(),
+  })
+    .addOperation(
+      contract.call(
+        "release_funds",
+        StellarSdk.xdr.ScVal.scvU64(
+          StellarSdk.xdr.Uint64.fromString(trade.chainTradeId),
+        ),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const prepared = await server.prepareTransaction(transaction);
+  return prepared.toXDR();
+}
+
 export class ContractService {
   private readonly rpcServer: StellarSdk.rpc.Server;
   private readonly contractId: string;
@@ -28,19 +160,19 @@ export class ContractService {
   private readonly networkPassphrase: string;
 
   constructor(
-    rpcUrl: string = process.env.STELLAR_RPC_URL || DEFAULT_RPC_URL,
-    contractId: string = process.env.CONTRACT_ID || "",
+    rpcUrl: string = getRpcUrl(),
+    contractId: string = getEscrowContractId(),
     usdcContractId: string = process.env.USDC_CONTRACT_ID || "",
-    stellarNetwork: string = process.env.STELLAR_NETWORK || "TESTNET"
+    networkPassphrase: string = getNetworkPassphrase(),
   ) {
-    this.rpcServer = new StellarSdk.rpc.Server(rpcUrl);
+    this.rpcServer = getRpcServer(rpcUrl);
     this.contractId = contractId;
     this.usdcContractId = usdcContractId;
-    this.networkPassphrase = this.resolveNetworkPassphrase(stellarNetwork);
+    this.networkPassphrase = networkPassphrase;
   }
 
   public async buildCreateTradeTx(
-    input: BuildCreateTradeTxInput
+    input: BuildCreateTradeTxInput,
   ): Promise<BuildCreateTradeTxResult> {
     if (!this.contractId) {
       throw new Error("CONTRACT_ID is not configured");
@@ -59,15 +191,16 @@ export class ContractService {
           "create_trade",
           StellarSdk.Address.fromString(input.buyerAddress).toScVal(),
           StellarSdk.Address.fromString(input.sellerAddress).toScVal(),
-          StellarSdk.nativeToScVal(amount, { type: "i128" })
-        )
+          StellarSdk.nativeToScVal(amount, { type: "i128" }),
+        ),
       )
       .setTimeout(DEFAULT_TIMEOUT_SECONDS)
       .build();
 
     const simulation = await this.rpcServer.simulateTransaction(transaction);
     const tradeId = this.extractTradeId(simulation);
-    const preparedTransaction = await this.rpcServer.prepareTransaction(transaction);
+    const preparedTransaction =
+      await this.rpcServer.prepareTransaction(transaction);
 
     return {
       tradeId,
@@ -76,7 +209,7 @@ export class ContractService {
   }
 
   public async buildDepositTx(
-    trade: Pick<Trade, "tradeId" | "buyer" | "amountUsdc">
+    trade: Pick<Trade, "tradeId" | "buyer" | "amountUsdc">,
   ): Promise<BuildDepositTxResult> {
     if (!this.contractId) {
       throw new Error("CONTRACT_ID is not configured");
@@ -98,39 +231,37 @@ export class ContractService {
       .addOperation(
         contract.call(
           "deposit",
-          StellarSdk.nativeToScVal(BigInt(trade.tradeId), { type: "u64" })
-        )
+          StellarSdk.nativeToScVal(BigInt(trade.tradeId), { type: "u64" }),
+        ),
       )
       .setTimeout(DEFAULT_TIMEOUT_SECONDS)
       .build();
 
-    const preparedTransaction = await this.rpcServer.prepareTransaction(transaction);
+    const preparedTransaction =
+      await this.rpcServer.prepareTransaction(transaction);
 
     return {
       unsignedXdr: preparedTransaction.toXDR(),
     };
   }
 
-  private resolveNetworkPassphrase(network: string): string {
-    if (network.toUpperCase() === "PUBLIC") {
-      return StellarSdk.Networks.PUBLIC;
-    }
-
-    return StellarSdk.Networks.TESTNET;
-  }
-
   private toContractAmount(amountUsdc: string): bigint {
     const [wholePart, fractionPart = ""] = amountUsdc.split(".");
-    const paddedFraction = `${fractionPart}0000000`.slice(0, Number(USDC_DECIMALS));
+    const paddedFraction = `${fractionPart}0000000`.slice(
+      0,
+      Number(USDC_DECIMALS),
+    );
 
     return BigInt(wholePart) * USDC_BASE + BigInt(paddedFraction);
   }
 
   private extractTradeId(
-    simulation: StellarSdk.rpc.Api.SimulateTransactionResponse
+    simulation: StellarSdk.rpc.Api.SimulateTransactionResponse,
   ): string {
     if ("error" in simulation && typeof simulation.error === "string") {
-      throw new Error(`Failed to simulate create_trade transaction: ${simulation.error}`);
+      throw new Error(
+        `Failed to simulate create_trade transaction: ${simulation.error}`,
+      );
     }
 
     if (!("result" in simulation) || !simulation.result) {
