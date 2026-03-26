@@ -243,6 +243,40 @@ export class ContractService {
       unsignedXdr: preparedTransaction.toXDR(),
     };
   }
+  /**
+   * Builds an unsigned Soroban XDR for `submit_manifest(trade_id, driver_name_hash, driver_id_hash)`.
+   * Hashes are hex strings (SHA-256) of the sensitive fields.
+   */
+  public async buildSubmitManifestTx(input: {
+    tradeId: string;
+    sellerAddress: string;
+    driverNameHash: string;
+    driverIdHash: string;
+  }): Promise<{ unsignedXdr: string }> {
+    if (!this.contractId) throw new Error("CONTRACT_ID is not configured");
+
+    const account = await this.rpcServer.getAccount(input.sellerAddress);
+    const contract = new StellarSdk.Contract(this.contractId);
+
+    const transaction = new StellarSdk.TransactionBuilder(account, {
+      fee: StellarSdk.BASE_FEE,
+      networkPassphrase: this.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "submit_manifest",
+          StellarSdk.nativeToScVal(BigInt(input.tradeId), { type: "u64" }),
+          StellarSdk.nativeToScVal(input.driverNameHash, { type: "string" }),
+          StellarSdk.nativeToScVal(input.driverIdHash, { type: "string" }),
+        ),
+      )
+      .setTimeout(DEFAULT_TIMEOUT_SECONDS)
+      .build();
+
+    const prepared = await this.rpcServer.prepareTransaction(transaction);
+    return { unsignedXdr: prepared.toXDR() };
+  }
+
   private toContractAmount(amountUsdc: string): bigint {
     const [wholePart, fractionPart = ""] = amountUsdc.split(".");
     const paddedFraction = `${fractionPart}0000000`.slice(

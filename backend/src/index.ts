@@ -4,21 +4,23 @@ import fs from "fs";
 import path from "path";
 import swaggerUi from "swagger-ui-express";
 import YAML from "yamljs";
+import cors from "cors";
 import { prisma } from "./lib/db";
 import userRoutes from "./routes/user.routes";
 import { EventListenerService } from "./services/eventListener.service";
-import { tradeRoutes } from "./routes/trade.routes";
+import { createTradeRouter } from "./routes/trade.routes";
 import { walletRoutes } from "./routes/wallet.routes";
+import { authRoutes } from "./routes/auth.routes";
+import { createManifestRouter } from "./routes/manifest.routes";
+import { createEvidenceRouter } from "./routes/evidence.routes";
+import { createAuditTrailRouter } from "./routes/auditTrail.routes";
+import { createApp } from "./app";
+import { env } from "./config/env";
 
-dotenv.config();
+env; // Validate early
 
 const app = createApp();
 const port = Number(process.env.PORT || 4000);
-
-app.use(cors());
-app.use(express.json());
-app.use("/trades", tradeRoutes);
-app.use("/wallet", walletRoutes);
 
 const docsDir = path.join(__dirname, "docs");
 const openapiYamlPath = path.join(docsDir, "openapi.yaml");
@@ -46,14 +48,6 @@ if (process.env.NODE_ENV !== "production" && openapiSpec) {
 }
 
 app.use("/users", userRoutes);
-
-app.get("/health", (_req, res) => {
-  res.status(200).json({
-    status: "ok",
-    service: "amana-backend",
-    timestamp: new Date().toISOString(),
-  });
-});
 
 const eventListenerService = new EventListenerService(prisma);
 
