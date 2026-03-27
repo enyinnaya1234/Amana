@@ -2,13 +2,12 @@ import { TradeStatus } from "@prisma/client";
 import * as StellarSdk from "@stellar/stellar-sdk";
 import type { Request, Response } from "express";
 import { AuthRequest } from "../middleware/auth.middleware";
-import { tradeRepository } from "../repositories/trade.repository";
 import {
   buildConfirmDeliveryTx,
   buildReleaseFundsTx,
   ContractService,
 } from "../services/contract.service";
-import { TradeAccessDeniedError, TradeService } from "../services/trade.service";
+import { TradeAccessDeniedError, TradeService, DisputeTradeStatusError } from "../services/trade.service";
 
 const CALLER_HEADER = "x-stellar-address";
 const AMOUNT_USDC_PATTERN = /^\d+(?:\.\d{1,7})?$/;
@@ -55,89 +54,12 @@ export function isBuyerOrAdmin(
   return tradeBuyer === caller || admins.has(caller);
 }
 
-export async function confirmDeliveryHandler(
-  req: Request,
-  res: Response,
-): Promise<void> {
-  const id = String(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id);
-  const caller = getCallerStellarAddress(req);
-  if (!caller) {
-    res.status(401).json({ error: "Missing X-Stellar-Address header" });
-    return;
-  }
-
-  const trade = tradeRepository.getById(id);
-  if (!trade) {
-    res.status(404).json({ error: "Trade not found" });
-    return;
-  }
-
-  if (trade.status !== "FUNDED") {
-    res.status(400).json({
-      error: `Trade must be FUNDED to confirm delivery (current: ${trade.status})`,
-    });
-    return;
-  }
-
-  if (!isBuyer(trade.buyerStellarAddress, caller)) {
-    res.status(403).json({ error: "Only the buyer may confirm delivery" });
-    return;
-  }
-
-  try {
-    const unsignedXdr = await buildConfirmDeliveryTx(trade, caller);
-    res.status(200).json({ unsignedXdr });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    res.status(500).json({ error: message });
-  }
-}
-
-export async function releaseFundsHandler(
-  req: Request,
-  res: Response,
-): Promise<void> {
-  const id = String(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id);
-  const caller = getCallerStellarAddress(req);
-  if (!caller) {
-    res.status(401).json({ error: "Missing X-Stellar-Address header" });
-    return;
-  }
-
-  const trade = tradeRepository.getById(id);
-  if (!trade) {
-    res.status(404).json({ error: "Trade not found" });
-    return;
-  }
-
-  if (trade.status !== "DELIVERED") {
-    res.status(400).json({
-      error: `Trade must be DELIVERED to release funds (current: ${trade.status})`,
-    });
-    return;
-  }
-
-  if (!isBuyerOrAdmin(trade.buyerStellarAddress, caller)) {
-    res
-      .status(403)
-      .json({ error: "Only the buyer or an admin may release funds" });
-    return;
-  }
-
-  try {
-    const unsignedXdr = await buildReleaseFundsTx(trade, caller);
-    res.status(200).json({ unsignedXdr });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    res.status(500).json({ error: message });
-  }
-}
 
 export class TradeController {
   constructor(
     private readonly tradeService: TradeService = new TradeService(),
     private readonly contractService: ContractService = new ContractService(),
-  ) {}
+  ) { }
 
   public createTrade = async (
     req: AuthRequest,
@@ -174,8 +96,8 @@ export class TradeController {
 
       await this.tradeService.createPendingTrade({
         tradeId,
-        buyer: buyerAddress,
-        seller: sellerAddress,
+        buyerAddress,
+        sellerAddress,
         amountUsdc: normalizedAmountUsdc,
       });
 
@@ -233,6 +155,139 @@ export class TradeController {
       return res
         .status(500)
         .json({ error: "Failed to build deposit transaction" });
+    }
+  };
+
+  public confirmDelivery = async (
+    req: Request,
+    res: Response,
+  ): Promise<void> => {
+    const id = String(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id);
+    const caller = getCallerStellarAddress(req);
+    if (!caller) {
+      res.status(401).json({ error: "Missing X-Stellar-Address header" });
+      return;
+    }
+
+    try {
+      const trade = await this.tradeService.getTradeById(id, caller);
+      if (!trade) {
+        res.status(404).json({ error: "Trade not found" });
+        return;
+      }
+
+      if (trade.status !== TradeStatus.FUNDED) {
+        res.status(400).json({
+          error: `Trade must be FUNDED to confirm delivery (current: ${trade.status})`,
+        });
+        return;
+      }
+
+      if (!isBuyer(trade.buyerAddress, caller)) {
+        res.status(403).json({ error: "Only the buyer may confirm delivery" });
+        return;
+      }
+
+      const unsignedXdr = await buildConfirmDeliveryTx(trade, caller);
+      res.status(200).json({ unsignedXdr });
+    } catch (error) {
+      if (error instanceof TradeAccessDeniedError) {
+        res.status(403).json({ error: "Forbidden" });
+        return;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      res.status(500).json({ error: message });
+    }
+  };
+
+  public releaseFunds = async (
+    req: Request,
+    res: Response,
+  ): Promise<void> => {
+    const id = String(Array.isArray(req.params.id) ? req.params.id[0] : req.params.id);
+    const caller = getCallerStellarAddress(req);
+    if (!caller) {
+      res.status(401).json({ error: "Missing X-Stellar-Address header" });
+      return;
+    }
+
+    try {
+      const trade = await this.tradeService.getTradeById(id, caller);
+      if (!trade) {
+        res.status(404).json({ error: "Trade not found" });
+        return;
+      }
+
+      if (trade.status !== TradeStatus.DELIVERED) {
+        res.status(400).json({
+          error: `Trade must be DELIVERED to release funds (current: ${trade.status})`,
+        });
+        return;
+      }
+
+      if (!isBuyerOrAdmin(trade.buyerAddress, caller)) {
+        res
+          .status(403)
+          .json({ error: "Only the buyer or an admin may release funds" });
+        return;
+      }
+
+      const unsignedXdr = await buildReleaseFundsTx(trade, caller);
+      res.status(200).json({ unsignedXdr });
+    } catch (error) {
+      if (error instanceof TradeAccessDeniedError) {
+        res.status(403).json({ error: "Forbidden" });
+        return;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      res.status(500).json({ error: message });
+    }
+  };
+
+  public initiateDispute = async (
+    req: AuthRequest,
+    res: Response,
+  ): Promise<Response | void> => {
+    try {
+      const tradeId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!tradeId) {
+        return res.status(400).json({ error: "Trade id is required" });
+      }
+
+      const callerAddress = req.user?.walletAddress;
+      if (!callerAddress) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      const { reason, category } = req.body as { reason?: unknown; category?: unknown };
+      if (!reason || typeof reason !== "string") {
+        return res.status(400).json({ error: "Reason string is required" });
+      }
+      if (!category || typeof category !== "string") {
+        return res.status(400).json({ error: "Category string is required" });
+      }
+
+      const { unsignedXdr } = await this.tradeService.initiateDispute(
+        tradeId,
+        callerAddress,
+        reason,
+        category,
+      );
+
+      return res.status(200).json({ unsignedXdr });
+    } catch (error) {
+      if (error instanceof TradeAccessDeniedError) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      if (error instanceof DisputeTradeStatusError) {
+        return res.status(400).json({ error: error.message });
+      }
+      if (error instanceof Error && error.message === "Trade not found") {
+        return res.status(404).json({ error: "Trade not found" });
+      }
+
+      console.error("Dispute initiation failed:", error);
+      return res.status(500).json({ error: "Failed to initiate dispute" });
     }
   };
   private isValidPublicKey(value: unknown): value is string {

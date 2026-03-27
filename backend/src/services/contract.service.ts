@@ -86,7 +86,7 @@ function getNetworkPassphrase(): string {
  * Caller should sign and submit via a wallet / RPC.
  */
 export async function buildConfirmDeliveryTx(
-  trade: TradeRecord,
+  trade: Pick<Trade, "tradeId" | "status">,
   sourceAccountId: string,
 ): Promise<string> {
   if (trade.status !== "FUNDED") {
@@ -106,7 +106,7 @@ export async function buildConfirmDeliveryTx(
       contract.call(
         "confirm_delivery",
         StellarSdk.xdr.ScVal.scvU64(
-          StellarSdk.xdr.Uint64.fromString(trade.chainTradeId),
+          StellarSdk.xdr.Uint64.fromString(trade.tradeId),
         ),
       ),
     )
@@ -121,7 +121,7 @@ export async function buildConfirmDeliveryTx(
  * Builds an unsigned Soroban transaction XDR (base64) for `release_funds(trade_id)`.
  */
 export async function buildReleaseFundsTx(
-  trade: TradeRecord,
+  trade: Pick<Trade, "tradeId" | "status">,
   sourceAccountId: string,
 ): Promise<string> {
   if (trade.status !== "DELIVERED") {
@@ -141,8 +141,38 @@ export async function buildReleaseFundsTx(
       contract.call(
         "release_funds",
         StellarSdk.xdr.ScVal.scvU64(
-          StellarSdk.xdr.Uint64.fromString(trade.chainTradeId),
+          StellarSdk.xdr.Uint64.fromString(trade.tradeId),
         ),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const prepared = await server.prepareTransaction(transaction);
+  return prepared.toXDR();
+}
+
+/**
+ * Builds an unsigned Soroban transaction XDR (base64) for `initiate_dispute(trade_id, initiator, reason_hash)`.
+ */
+export async function buildInitiateDisputeTx(
+  trade: { tradeId: string },
+  initiatorAddress: string,
+  reasonHash: string,
+): Promise<string> {
+  const server = getRpcServer(getRpcUrl());
+  const account = await server.getAccount(initiatorAddress);
+  const contract = new StellarSdk.Contract(getEscrowContractId());
+  const transaction = new StellarSdk.TransactionBuilder(account, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase: getNetworkPassphrase(),
+  })
+    .addOperation(
+      contract.call(
+        "initiate_dispute",
+        StellarSdk.nativeToScVal(BigInt(trade.tradeId), { type: "u64" }),
+        StellarSdk.Address.fromString(initiatorAddress).toScVal(),
+        StellarSdk.nativeToScVal(reasonHash, { type: "string" }),
       ),
     )
     .setTimeout(30)
@@ -208,7 +238,7 @@ export class ContractService {
   }
 
   public async buildDepositTx(
-    trade: Pick<Trade, "tradeId" | "buyer" | "amountUsdc">,
+    trade: Pick<Trade, "tradeId" | "buyerAddress" | "amountUsdc">,
   ): Promise<BuildDepositTxResult> {
     if (!this.contractId) {
       throw new Error("CONTRACT_ID is not configured");
@@ -218,7 +248,7 @@ export class ContractService {
       throw new Error("USDC_CONTRACT_ID is not configured");
     }
 
-    const account = await this.rpcServer.getAccount(trade.buyer);
+    const account = await this.rpcServer.getAccount(trade.buyerAddress);
     const contract = new StellarSdk.Contract(this.contractId);
 
     // The current escrow contract pulls the buyer's USDC during `deposit()`,
@@ -268,6 +298,38 @@ export class ContractService {
           StellarSdk.nativeToScVal(BigInt(input.tradeId), { type: "u64" }),
           StellarSdk.nativeToScVal(input.driverNameHash, { type: "string" }),
           StellarSdk.nativeToScVal(input.driverIdHash, { type: "string" }),
+        ),
+      )
+      .setTimeout(DEFAULT_TIMEOUT_SECONDS)
+      .build();
+
+    const prepared = await this.rpcServer.prepareTransaction(transaction);
+    return { unsignedXdr: prepared.toXDR() };
+  }
+
+  /**
+   * Builds an unsigned Soroban XDR for `initiate_dispute(trade_id, initiator, reason_hash)`.
+   */
+  public async buildInitiateDisputeTx(input: {
+    tradeId: string;
+    initiatorAddress: string;
+    reasonHash: string;
+  }): Promise<{ unsignedXdr: string }> {
+    if (!this.contractId) throw new Error("CONTRACT_ID is not configured");
+
+    const account = await this.rpcServer.getAccount(input.initiatorAddress);
+    const contract = new StellarSdk.Contract(this.contractId);
+
+    const transaction = new StellarSdk.TransactionBuilder(account, {
+      fee: StellarSdk.BASE_FEE,
+      networkPassphrase: this.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "initiate_dispute",
+          StellarSdk.nativeToScVal(BigInt(input.tradeId), { type: "u64" }),
+          StellarSdk.Address.fromString(input.initiatorAddress).toScVal(),
+          StellarSdk.nativeToScVal(input.reasonHash, { type: "string" }),
         ),
       )
       .setTimeout(DEFAULT_TIMEOUT_SECONDS)
