@@ -1,6 +1,6 @@
 import { Router } from "express";
 import rateLimit from "express-rate-limit";
-import { requireAuth } from "../middleware/auth";
+import { authMiddleware } from "../middleware/auth.middleware";
 import { getMe, updateMe, getUserByAddress } from "../controllers/user.controller";
 
 const limiter = rateLimit({
@@ -14,8 +14,8 @@ const router = Router();
 
 router.use(limiter);
 
-router.get("/me", requireAuth, getMe);
-router.put("/me", requireAuth, updateMe);
+router.get("/me", authMiddleware, getMe);
+router.put("/me", authMiddleware, updateMe);
 router.get("/:address", getUserByAddress);
 
 export default router;

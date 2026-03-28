@@ -1,4 +1,5 @@
 import * as StellarSdk from "@stellar/stellar-sdk";
+import { appLogger } from "../middleware/logger";
 
 export class StellarService {
   private server: StellarSdk.Horizon.Server;
@@ -35,7 +36,7 @@ export class StellarService {
       });
       return balance ? balance.balance : "0";
     } catch (error) {
-      console.error(`Failed to get balance for ${publicKey}:`, error);
+      appLogger.error({ error, publicKey }, "Failed to get account balance");
       throw new Error("Unable to fetch balance");
     }
   }

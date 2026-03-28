@@ -1,5 +1,6 @@
 import { StellarService } from "./stellar.service";
 import * as StellarSdk from "@stellar/stellar-sdk";
+import { appLogger } from "../middleware/logger";
 
 export class PathPaymentService {
   private stellarService: StellarService;
@@ -49,7 +50,7 @@ export class PathPaymentService {
         path: record.path,
       }));
     } catch (error) {
-      console.error("Path payment quote error:", error);
+      appLogger.error({ error }, "Path payment quote error");
       throw new Error("Failed to fetch path payment quotes");
     }
   }

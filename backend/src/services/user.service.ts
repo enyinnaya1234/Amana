@@ -1,7 +1,8 @@
-import { supabase } from "../lib/supabase";
+import { getSupabaseClient } from "../lib/supabase";
 import { UpdateProfileInput } from "../validators/user.validators";
 
 export async function findOrCreateUser(address: string) {
+  const supabase = getSupabaseClient();
   const { data, error } = await supabase
     .from("users")
     .select("*")
@@ -25,6 +26,7 @@ export async function findOrCreateUser(address: string) {
 }
 
 export async function updateUser(address: string, input: UpdateProfileInput) {
+  const supabase = getSupabaseClient();
   const { data, error } = await supabase
     .from("users")
     .update({ ...input, updated_at: new Date().toISOString() })
@@ -37,6 +39,7 @@ export async function updateUser(address: string, input: UpdateProfileInput) {
 }
 
 export async function getPublicProfile(address: string) {
+  const supabase = getSupabaseClient();
   const { data, error } = await supabase
     .from("users")
     .select("address, display_name, avatar_url, created_at")

@@ -8,7 +8,7 @@ export const tradeRepository = {
   },
 
   upsert(record: TradeRecord): void {
-    trades.set(record.id, record);
+    trades.set(String(record.id), record);
   },
 
   /** Test helper */

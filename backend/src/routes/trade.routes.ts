@@ -29,6 +29,9 @@ export function createTradeRouter(prisma: PrismaClient = defaultPrisma) {
 
   router.post("/", authMiddleware, tradeController.createTrade);
   router.post("/:id/deposit", authMiddleware, tradeController.buildDepositTx);
+  router.post("/:id/confirm", authMiddleware, tradeController.confirmDelivery);
+  router.post("/:id/release", authMiddleware, tradeController.releaseFunds);
+  router.post("/:id/dispute", authMiddleware, tradeController.initiateDispute);
 
   router.get("/", async (req, res) => {
     const callerAddress = requireHeaderAuth(req, res);

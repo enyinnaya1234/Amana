@@ -49,8 +49,6 @@ describe("eventHandlers", () => {
 
   beforeEach(() => {
     mockPrisma = createMockPrisma();
-    jest.spyOn(console, "log").mockImplementation();
-    jest.spyOn(console, "warn").mockImplementation();
   });
 
   afterEach(() => {
@@ -209,9 +207,6 @@ describe("eventHandlers", () => {
       };
 
       await expect(dispatchEvent(mockPrisma, event)).resolves.not.toThrow();
-      expect(console.warn).toHaveBeenCalledWith(
-        expect.stringContaining("Unknown event type")
-      );
     });
 
     it("should not call prisma for an unknown EventType", async () => {

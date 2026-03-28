@@ -1,11 +1,19 @@
-import { Prisma, PrismaClient, Trade, TradeStatus } from "@prisma/client";
+import crypto from "crypto";
+import { Prisma, PrismaClient, Trade, TradeStatus, DisputeStatus } from "@prisma/client";
 import { prisma as defaultPrisma } from "../lib/db";
+import { ContractService } from "./contract.service";
+
+function sha256(value: string): string {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
 
 export interface CreatePendingTradeInput {
   tradeId: string;
-  buyer: string;
-  seller: string;
+  buyerAddress: string;
+  sellerAddress: string;
   amountUsdc: string;
+  buyerLossBps: number;
+  sellerLossBps: number;
 }
 
 export type TradeListFilters = {
@@ -24,8 +32,19 @@ export class TradeAccessDeniedError extends Error {
   }
 }
 
+export class DisputeTradeStatusError extends Error {
+  status = 400;
+  constructor(status: string) {
+    super(`Trade must be in FUNDED or DELIVERED status to initiate a dispute (current: ${status})`);
+    this.name = "DisputeTradeStatusError";
+  }
+}
+
 export class TradeService {
-  constructor(private readonly prisma: TradeDatabase = defaultPrisma) {}
+  constructor(
+    private readonly prisma: TradeDatabase = defaultPrisma,
+    private readonly contractService: ContractService = new ContractService(),
+  ) { }
 
   async createPendingTrade(input: CreatePendingTradeInput): Promise<Trade> {
     return this.prisma.trade.create({
@@ -43,7 +62,7 @@ export class TradeService {
     const orderBy = this.parseSort(filters.sort);
 
     const where: Prisma.TradeWhereInput = {
-      OR: [{ buyer: address }, { seller: address }],
+      OR: [{ buyerAddress: address }, { sellerAddress: address }],
       ...(filters.status ? { status: filters.status } : {}),
     };
 
@@ -86,7 +105,7 @@ export class TradeService {
       return null;
     }
 
-    if (trade.buyer !== callerAddress && trade.seller !== callerAddress) {
+    if (trade.buyerAddress !== callerAddress && trade.sellerAddress !== callerAddress) {
       throw new TradeAccessDeniedError();
     }
 
@@ -96,7 +115,7 @@ export class TradeService {
   async getUserStats(address: string) {
     const trades = await this.prisma.trade.findMany({
       where: {
-        OR: [{ buyer: address }, { seller: address }],
+        OR: [{ buyerAddress: address }, { sellerAddress: address }],
       },
       select: {
         amountUsdc: true,
@@ -138,8 +157,8 @@ export class TradeService {
     const allowedFields = new Set<string>([
       "id",
       "tradeId",
-      "buyer",
-      "seller",
+      "buyerAddress",
+      "sellerAddress",
       "amountUsdc",
       "status",
       "createdAt",
@@ -151,5 +170,46 @@ export class TradeService {
     }
 
     return { [field]: direction };
+  }
+
+  async initiateDispute(id: string, callerAddress: string, reason: string, category: string) {
+    const trade = await this.getTradeById(id, callerAddress);
+    if (!trade) {
+      throw new Error("Trade not found");
+    }
+
+    // Access check is already done by getTradeById, but let's be explicit
+    if (trade.buyerAddress !== callerAddress && trade.sellerAddress !== callerAddress) {
+      throw new TradeAccessDeniedError();
+    }
+
+    // Check status: FUNDED or DELIVERED
+    if (trade.status !== TradeStatus.FUNDED && trade.status !== TradeStatus.DELIVERED) {
+      throw new DisputeTradeStatusError(trade.status);
+    }
+
+    const reasonHash = sha256(reason);
+
+    // Build contract transaction
+    // Note: getTradeById handles both numeric and string IDs for local lookup,
+    // but the contract needs the tradeId (the blockchain-sourced one).
+    const { unsignedXdr } = await this.contractService.buildInitiateDisputeTx({
+      tradeId: trade.tradeId,
+      initiatorAddress: callerAddress,
+      reasonHash,
+    });
+
+    // Create DB record
+    // We store the plaintext reason for human review.
+    await (this.prisma as PrismaClient).dispute.create({
+      data: {
+        tradeId: trade.tradeId,
+        initiator: callerAddress,
+        reason,
+        status: DisputeStatus.OPEN,
+      },
+    });
+
+    return { unsignedXdr };
   }
 }

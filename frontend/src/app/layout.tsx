@@ -1,5 +1,10 @@
 // src/app/layout.tsx
 import type { Metadata } from "next";
+import localFont from "next/font/local";
+import { Manrope } from "next/font/google";
+
+import "./globals.css";
+import { TopNav } from "@/components/TopNav";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { AppTopNav } from "@/components/layout/AppTopNav";
@@ -15,6 +20,12 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+const manrope = Manrope({
+  subsets: ['latin'],
+  display: 'swap',
+  variable: '--font-manrope',
+});
+
 export const metadata: Metadata = {
   title: "Amana — Secure Agricultural Escrow",
   description: "Blockchain-powered agricultural trade settlement",
@@ -28,8 +39,9 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body
-        className={`${geistSans.variable} ${geistMono.variable} font-sans bg-primary text-text-primary antialiased`}
+        className={`${geistSans.variable} ${geistMono.variable} ${manrope.variable} font-sans bg-primary text-text-primary antialiased`}
       >
+        <TopNav title="Amana" networkStatus="testnet" />
         <div className="flex flex-col h-screen">
           <AppTopNav />
           <div className="flex flex-1 overflow-hidden">
