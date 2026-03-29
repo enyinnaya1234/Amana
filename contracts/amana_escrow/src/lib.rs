@@ -932,6 +932,10 @@ mod test {
         client.mock_auths(&[]).deposit(&trade_id);
     }
 
+    // -----------------------------------------------------------------------
+    // confirm_delivery tests
+    // -----------------------------------------------------------------------
+
     #[test]
     #[should_panic(expected = "Trade must be in Created status")]
     fn test_deposit_fails_if_trade_already_funded() {
@@ -940,7 +944,7 @@ mod test {
         let contract_id = env.register(EscrowContract, ());
         let client = EscrowContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
-        let buyer = Address::generate(&env);
+        let buyer = env.invoker();
         let seller = Address::generate(&env);
         let treasury = Address::generate(&env);
         let usdc_id = env.register_stellar_asset_contract(admin.clone());
