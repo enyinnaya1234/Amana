@@ -1,4 +1,5 @@
 import Image from "next/image";
+import Avatar from "@/components/Avatar";
 
 export default function Home() {
   return (
@@ -14,25 +15,21 @@ export default function Home() {
         />
         <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
           <h1 className="max-w-xs font-sans text-display font-bold leading-tight tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
+            Avatar Component Test
           </h1>
           <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
+            Testing the base Avatar component with different sizes
           </p>
+          <div className="flex gap-4 items-center">
+            <Avatar alt="Extra small avatar" size="xs" />
+            <Avatar alt="Small avatar" size="sm" />
+            <Avatar alt="Medium avatar" size="md" />
+            <Avatar alt="Large avatar" size="lg" />
+            <Avatar alt="Extra large avatar" size="xl" />
+          </div>
+          <div className="flex gap-4 items-center">
+            <Avatar alt="Default size avatar" />
+          </div>
         </div>
         <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
           <a
